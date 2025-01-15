@@ -125,17 +125,10 @@ BEGIN
             WHEN ps.transactions_created_prev > 0 AND ps.transactions_created = 0 THEN 1 
             ELSE 0 
         END AS churns_flag,
-       
-       CASE 
-        -- Reactivation logic: Player was previously active, inactive for at least 1 month, and active again now
-        WHEN ps.transactions_created > 0 
-             AND ps.transactions_created_prev = 0 
-             AND ps.transactions_created_lifetime > ps.transactions_created -- Player had transactions earlier in lifetime
-             THEN 1
-        ELSE 0 
-    END AS reactivations_flag,  
-       
-    
+        CASE 
+            WHEN ps.transactions_created > 0 AND ps.transactions_created_prev = 0 AND ps.transactions_created_prev_2 > 0 THEN 1 
+            ELSE 0 
+        END AS reactivations_flag,  
         CASE 
             WHEN ps.transactions_created > 0 AND ps.transactions_created_prev > 0 THEN 1 
             ELSE 0 
