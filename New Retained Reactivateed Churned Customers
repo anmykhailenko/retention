@@ -1,0 +1,152 @@
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+ALTER PROCEDURE [Anastasiia].[sp_CalculatePlayerMetrics]
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    -- Drop the table if it already exists
+    IF OBJECT_ID('[DWH_Support].[Anastasiia].[PlayerMetrics]', 'U') IS NOT NULL
+        DROP TABLE [DWH_Support].[Anastasiia].[PlayerMetrics];
+
+    -- Create the output table with SiteName
+    CREATE TABLE [DWH_Support].[Anastasiia].[PlayerMetrics] (
+        PlayerID INT,
+        SiteID INT,
+        Site NVARCHAR(255), -- Add the Site name column
+        MonthStart DATE,
+        transactions_created INT,
+        transactions_created_lifetime INT,
+        transactions_created_prev INT,
+        transactions_created_prev_2 INT,
+        new_flag BIT,
+        churns_flag BIT,
+        reactivations_flag BIT,
+        retentions_flag BIT
+    );
+
+    WITH Months AS (
+        -- Generate the last 12 months
+        SELECT DATEADD(MONTH, n, DATEADD(MONTH, DATEDIFF(MONTH, 0, GETDATE()) - 12, 0)) AS MonthStart
+        FROM (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9), (10), (11)) AS Numbers(n)
+    ),
+    UniquePlayers AS (
+        -- Get distinct PlayerIDs
+        SELECT DISTINCT 
+            [Depositing Player] AS PlayerID,
+            [SiteID],
+            [DataCenterID]
+        FROM 
+            [DM_RMG].[dbo].[fact_rmg]
+        WHERE 
+            [Depositing Player] IS NOT NULL
+            AND [Date] > DATEADD(MONTH, -12, EOMONTH(GETDATE(), -1))
+            AND [Date] <= EOMONTH(GETDATE(), -1)
+    ),
+    PlayerMonths AS (
+        -- Cross join to associate all players with all months
+        SELECT 
+            p.PlayerID,
+            p.SiteID,
+            p.[DataCenterID],
+            m.MonthStart
+        FROM 
+            Months m
+        CROSS JOIN 
+            UniquePlayers p
+    ),
+    PlayerMonthlyData AS (
+        -- Aggregate actual transaction data
+        SELECT 
+            [Depositing Player] AS PlayerID,
+            DATEADD(MONTH, DATEDIFF(MONTH, 0, [Date]), 0) AS MonthStart,
+            COUNT(*) AS transactions_created
+        FROM 
+            [DM_RMG].[dbo].[fact_rmg]
+        WHERE 
+            [Depositing Player] IS NOT NULL 
+            AND b2c = 1
+            AND [Date] > DATEADD(MONTH, -12, EOMONTH(GETDATE(), -1))
+            AND [Date] <= EOMONTH(GETDATE(), -1)
+        GROUP BY 
+            [Depositing Player], DATEADD(MONTH, DATEDIFF(MONTH, 0, [Date]), 0)
+    ),
+    PlayerStatus AS (
+        -- Combine the full player-month list with actual data and calculate additional metrics
+        SELECT 
+            pm.PlayerID,
+            pm.SiteID,
+            pm.MonthStart,
+            pm.[DataCenterID],
+            ISNULL(pmd.transactions_created, 0) AS transactions_created,
+            SUM(ISNULL(pmd.transactions_created, 0)) OVER (PARTITION BY pm.PlayerID ORDER BY pm.MonthStart ASC) AS transactions_created_lifetime,
+            LAG(ISNULL(pmd.transactions_created, 0), 1, 0) OVER (PARTITION BY pm.PlayerID ORDER BY pm.MonthStart ASC) AS transactions_created_prev,
+            LAG(ISNULL(pmd.transactions_created, 0), 2, 0) OVER (PARTITION BY pm.PlayerID ORDER BY pm.MonthStart ASC) AS transactions_created_prev_2
+        FROM 
+            PlayerMonths pm
+        LEFT JOIN 
+            PlayerMonthlyData pmd
+        ON 
+            pm.PlayerID = pmd.PlayerID
+            AND pm.MonthStart = pmd.MonthStart
+    )
+    -- Insert results into the final table
+    INSERT INTO [DWH_Support].[Anastasiia].[PlayerMetrics] (
+        PlayerID, 
+        SiteID, 
+        Site,  -- Insert Site name
+        MonthStart, 
+        transactions_created, 
+        transactions_created_lifetime, 
+        transactions_created_prev, 
+        transactions_created_prev_2, 
+        new_flag, 
+        churns_flag, 
+        reactivations_flag, 
+        retentions_flag
+    )
+    SELECT DISTINCT
+        ps.PlayerID,
+        ps.SiteID,
+        ds.[Site Name], 
+        ps.MonthStart,
+        ps.transactions_created, 
+        ps.transactions_created_lifetime,
+        ps.transactions_created_prev,
+        ps.transactions_created_prev_2,
+        CASE 
+            WHEN ps.transactions_created = ps.transactions_created_lifetime AND ps.transactions_created > 0 THEN 1 
+            ELSE 0 
+        END AS new_flag,
+        CASE 
+            WHEN ps.transactions_created_prev > 0 AND ps.transactions_created = 0 THEN 1 
+            ELSE 0 
+        END AS churns_flag,
+       
+       CASE 
+        -- Reactivation logic: Player was previously active, inactive for at least 1 month, and active again now
+        WHEN ps.transactions_created > 0 
+             AND ps.transactions_created_prev = 0 
+             AND ps.transactions_created_lifetime > ps.transactions_created -- Player had transactions earlier in lifetime
+             THEN 1
+        ELSE 0 
+    END AS reactivations_flag,  
+       
+    
+        CASE 
+            WHEN ps.transactions_created > 0 AND ps.transactions_created_prev > 0 THEN 1 
+            ELSE 0 
+        END AS retentions_flag
+    FROM 
+        PlayerStatus ps
+    LEFT JOIN 
+        [DWH_Support].[Dimensions].[Site] ds
+    ON 
+        ps.SiteID = ds.[Site GBID] ;
+
+    PRINT 'Table [DWH_Support].[Anastasiia].[PlayerMetrics] created and populated successfully.';
+END;
+GO
